@@ -110,3 +110,7 @@ go test -run Real -v ./...
 - Depende do formato do `UserSettings.*.json` e dos `AutomationId` da Proton para Windows (testado na 5.1.8).
 - A Proton não tem comando para reconectar. Se a automação de interface quebrar, sobra o aviso para reconectar à mão.
 - Só o Discord oficial (normal, PTB e Canary) instalado em `%LOCALAPPDATA%`.
+
+## Licença
+
+[GPL-3.0](LICENSE). Quem distribuir uma versão modificada precisa publicar o código dela sob a mesma licença.
