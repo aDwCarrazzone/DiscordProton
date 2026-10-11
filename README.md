@@ -33,7 +33,9 @@ A cada clique no atalho:
 4. Abre o Discord e o reinicia se ele estava rodando fora do túnel.
 5. Vigia o Discord por 3 minutos. Se ele se atualizar na própria abertura e voltar de uma pasta nova, repete o passo 3.
 
-Se a Proton estiver desconectada, ele conecta na conexão recente mais nova que não seja do Brasil antes de abrir o Discord.
+Se a Proton estiver desconectada, ele conecta na conexão recente mais nova que não seja do Brasil antes de abrir o Discord. Ele nunca escolhe o "País mais rápido", que costuma cair no Brasil, nem quando essa era a conexão anterior.
+
+Cliques seguidos em atalhos diferentes entram numa fila: só um por vez mexe na Proton, e o seguinte espera a vez e abre o seu Discord. A vigia depois de abrir não segura a fila.
 
 ### O que ele mexe
 

@@ -33,7 +33,8 @@ func (r uiaResult) where() string {
 // O script vai por -EncodedCommand e nao por arquivo: nada em disco que outro processo
 // possa trocar entre a escrita e a execucao.
 func protonUI(action string, timeout time.Duration) (uiaResult, error) {
-	script := fmt.Sprintf("$Action = '%s'\n$TimeoutSec = %d\n", action, int(timeout.Seconds())) + uiaScript
+	launcher, _ := protonLauncher()
+	script := fmt.Sprintf("$Action = %s\n$TimeoutSec = %d\n$Launcher = %s\n", psQuote(action), int(timeout.Seconds()), psQuote(launcher)) + uiaScript
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShell(script))
 	cmd.SysProcAttr = hiddenProcess()
 	out, err := cmd.Output()
@@ -53,6 +54,12 @@ func protonUI(action string, timeout time.Duration) (uiaResult, error) {
 		return result, errors.New(result.Error)
 	}
 	return result, nil
+}
+
+// Texto entre aspas simples no PowerShell nao expande nada; so a propria aspa simples
+// precisa ser dobrada.
+func psQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 func encodePowerShell(script string) string {

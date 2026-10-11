@@ -2,8 +2,8 @@
 # AutomationId usados aqui sao os mesmos que a propria Proton usa nos testes de
 # interface dela (src/Tests/ProtonVPN.UI.Tests), o que os torna estaveis entre versoes.
 #
-# O Go prefixa $Action ('state', 'connect' ou 'reconnect') e $TimeoutSec. A saida e uma
-# linha JSON so: {"ok":true,...} ou {"ok":false,"error":"..."}.
+# O Go prefixa $Action ('state', 'connect' ou 'reconnect'), $TimeoutSec e $Launcher. A
+# saida e uma linha JSON so: {"ok":true,...} ou {"ok":false,"error":"..."}.
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -43,6 +43,18 @@ function Find-Window {
     return $null
 }
 
+# Reiniciada, a Proton pode subir escondida na bandeja, e janela escondida nao existe
+# para a automacao. Chamar o launcher de novo traz a janela para frente.
+function Open-Window {
+    $end = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $end) {
+        $window = Wait-For { Find-Window } 6
+        if ($window) { return $window }
+        if ($Launcher) { Start-Process -FilePath $Launcher -ErrorAction SilentlyContinue }
+    }
+    return $null
+}
+
 function Find-Id($root, [string]$id) {
     $cond = New-Object System.Windows.Automation.PropertyCondition($AE::AutomationIdProperty, $id)
     return $root.FindFirst($Scope::Descendants, $cond)
@@ -64,12 +76,13 @@ function Card($window) {
 
 # A lista ao lado do cartao pode estar em Paises ou Perfis; em Paises, o primeiro
 # botao seria o primeiro pais em ordem alfabetica. Recentes e sempre a primeira aba.
+# Logo depois de reiniciada, a Proton mostra o cartao antes de montar essa lista.
 function Show-Recents($window) {
     $cond = New-Object System.Windows.Automation.PropertyCondition($AE::AutomationIdProperty, 'ConnectionsPageItem')
-    $tabs = $window.FindAll($Scope::Descendants, $cond)
-    if ($tabs.Count -eq 0) { return $false }
+    $recents = Wait-For { $window.FindFirst($Scope::Descendants, $cond) } 15
+    if (-not $recents) { return $false }
     $pattern = $null
-    if ($tabs[0].TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
+    if ($recents.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
         $pattern.Select()
         Start-Sleep -Milliseconds 600
         return $true
@@ -91,8 +104,10 @@ function Recent-Buttons($window) {
 function Connect-To($window, [string]$preferred) {
     if (-not (Show-Recents $window)) { Fail 'nao achei a aba Recentes da Proton' }
 
+    # A conexao de antes so serve se for um pais de verdade fora do Brasil. Se ela era o
+    # "Pais mais rapido", reconectar nela cairia no Brasil de novo.
     $target = $null
-    if ($preferred -and $preferred -notmatch $noBrasil) {
+    if ($preferred -and $preferred -notmatch $naoEscolher) {
         $target = Wait-For { Find-Id $window "Connect_to_$preferred" } 10
     }
     if (-not $target) {
@@ -106,11 +121,12 @@ function Connect-To($window, [string]$preferred) {
     Press $target
     $card = Wait-For { $c = Card $window; if ($c.connected) { $c } } $TimeoutSec
     if (-not $card) { Fail 'a Proton nao terminou de conectar a tempo' }
-    if ($card.title -match $noBrasil) { Fail "a Proton conectou no Brasil ($($card.detail))" }
+    # No "Pais mais rapido" o titulo nao diz o pais; ele vem no detalhe ("Brasil - Sao Paulo").
+    if ($card.title -match $noBrasil -or $card.detail -match '^(Brasil|Brazil)\b') { Fail "a Proton conectou no Brasil ($($card.detail))" }
     Finish @{ ok = $true; title = $card.title; detail = $card.detail }
 }
 
-$window = Wait-For { Find-Window } $TimeoutSec
+$window = Open-Window
 if (-not $window) { Fail 'a janela da Proton nao apareceu' }
 if (-not (Wait-For { Find-Id $window 'ConnectionCardComponent' } $TimeoutSec)) { Fail 'a tela inicial da Proton nao carregou' }
 

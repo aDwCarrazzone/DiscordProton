@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -14,13 +15,18 @@ var (
 	user32                         = syscall.NewLazyDLL("user32.dll")
 	procQueryFullProcessImageNameW = kernel32.NewProc("QueryFullProcessImageNameW")
 	procCreateMutexW               = kernel32.NewProc("CreateMutexW")
+	procWaitForSingleObject        = kernel32.NewProc("WaitForSingleObject")
+	procReleaseMutex               = kernel32.NewProc("ReleaseMutex")
 	procMessageBoxW                = user32.NewProc("MessageBoxW")
 )
 
 const (
 	processQueryLimitedInformation = 0x1000
 	createNoWindow                 = 0x08000000
-	errorAlreadyExists             = 183
+
+	waitObject0   = 0x00000000
+	waitAbandoned = 0x00000080
+	waitTimeout   = 0x00000102
 
 	mbOK          = 0x00000000
 	mbOKCancel    = 0x00000001
@@ -76,22 +82,39 @@ func imagePath(pid uint32) (string, error) {
 	return syscall.UTF16ToString(buf[:size]), nil
 }
 
-// Dois cliques seguidos no atalho rodariam duas copias editando a mesma configuracao
-// e reiniciando a Proton uma em cima da outra.
-func claimSingleInstance(name string) (bool, error) {
+// namedMutex organiza a fila entre copias: duas trocando a lista ao mesmo tempo
+// reiniciariam a Proton uma em cima da outra. O dono de um mutex no Windows e a
+// thread, entao quem usa precisa ter chamado runtime.LockOSThread.
+type namedMutex struct {
+	handle uintptr
+}
+
+func openMutex(name string) (*namedMutex, error) {
 	ptr, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	handle, _, callErr := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(ptr)))
 	if handle == 0 {
-		return false, callErr
+		return nil, callErr
 	}
-	// O handle fica aberto de proposito ate o processo sair: e ele que segura a vez.
-	if errno, ok := callErr.(syscall.Errno); ok && errno == errorAlreadyExists {
+	return &namedMutex{handle}, nil
+}
+
+// Mutex abandonado, de uma copia que morreu segurando a vez, tambem conta como pego.
+func (m *namedMutex) acquire(timeout time.Duration) (bool, error) {
+	ret, _, callErr := procWaitForSingleObject.Call(m.handle, uintptr(timeout.Milliseconds()))
+	switch ret {
+	case waitObject0, waitAbandoned:
+		return true, nil
+	case waitTimeout:
 		return false, nil
 	}
-	return true, nil
+	return false, callErr
+}
+
+func (m *namedMutex) release() {
+	procReleaseMutex.Call(m.handle)
 }
 
 func messageBox(text string, flags uint32) int {

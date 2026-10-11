@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -24,9 +25,14 @@ type app struct {
 	local   string
 	dataDir string
 	log     *log.Logger
+	turn    *namedMutex
 }
 
 func main() {
+	// O mutex da fila pertence a thread que o pegou, e o Go troca goroutines de thread.
+	// Presa aqui, a goroutine principal pega e solta sempre da mesma.
+	runtime.LockOSThread()
+
 	opts := options{}
 	flag.StringVar(&opts.channel, "channel", "stable", "qual Discord abrir: stable, ptb ou canary")
 	flag.BoolVar(&opts.check, "check", false, "so mostra o que mudaria na lista da Proton, sem mexer em nada")
@@ -37,13 +43,6 @@ func main() {
 	if err != nil {
 		messageBox(err.Error(), mbIconError)
 		os.Exit(1)
-	}
-
-	// Outra copia ja esta cuidando disso. Abrir o Discord por fora agora poderia
-	// pega-lo no meio da troca, fora do tunel.
-	if first, err := claimSingleInstance(`Local\DiscordProton`); err == nil && !first {
-		a.log.Print("outra copia ja esta rodando, saindo")
-		return
 	}
 
 	if err := a.run(opts); err != nil {
@@ -69,7 +68,31 @@ func newApp() (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &app{local: local, dataDir: dataDir, log: log.New(io.MultiWriter(f, os.Stderr), "", log.LstdFlags)}, nil
+	turn, err := openMutex(`Local\DiscordProton`)
+	if err != nil {
+		return nil, fmt.Errorf("nao consegui criar a fila entre copias: %w", err)
+	}
+	return &app{local: local, dataDir: dataDir, log: log.New(io.MultiWriter(f, os.Stderr), "", log.LstdFlags), turn: turn}, nil
+}
+
+const turnWait = 2 * time.Minute
+
+// Espera a vez em vez de desistir: um clique no atalho de outro Discord durante a
+// troca da lista saia calado, e para quem clicou o Discord simplesmente nao abria.
+// So segura a vez quem mexe na Proton; a vigia depois de abrir roda sem ela.
+func (a *app) takeTurn() (release func(), err error) {
+	ok, err := a.turn.acquire(0)
+	if err == nil && !ok {
+		a.log.Print("outra copia esta mexendo na Proton, esperando a vez")
+		ok, err = a.turn.acquire(turnWait)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("outra janela do DiscordProton esta esperando uma resposta sua ha mais de 2 minutos, provavelmente a pergunta para reconectar a Proton. Responda la e clique no atalho de novo")
+	}
+	return a.turn.release, nil
 }
 
 func (a *app) run(opts options) error {
@@ -86,16 +109,32 @@ func (a *app) run(opts options) error {
 	}
 	a.log.Printf("versao atual: %s", target.Exe)
 
-	settings, list, plan, err := a.plan(installs)
-	if err != nil {
-		return err
-	}
-
 	if opts.check {
+		_, list, plan, err := a.plan(installs)
+		if err != nil {
+			return err
+		}
 		summary := describePlan(list, plan)
 		a.log.Print(summary)
 		messageBox(summary, mbIconInfo)
 		return nil
+	}
+
+	release, err := a.takeTurn()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+
+	// O plano sai depois de pegar a vez: quem estava na frente pode ter acabado de
+	// atualizar a lista, e ai nao ha mais nada a fazer.
+	settings, list, plan, err := a.plan(installs)
+	if err != nil {
+		return err
 	}
 
 	declined := false
@@ -116,6 +155,8 @@ func (a *app) run(opts options) error {
 	}
 	a.log.Printf("%s aberto", channel.Friendly)
 
+	release()
+	release = nil
 	if declined {
 		return nil
 	}
@@ -196,9 +237,12 @@ func (a *app) update(settings *protonSettings, list appList, plan syncPlan, inst
 	}
 
 	wasUp := tunnelUp()
-	if wasUp && !confirmReconnect() {
-		a.log.Print("reconexao recusada, a lista da Proton fica como estava")
-		return errReconnectDeclined
+	if wasUp {
+		if !confirmReconnect() {
+			a.log.Print("reconexao recusada, a lista da Proton fica como estava")
+			return errReconnectDeclined
+		}
+		a.log.Print("reconexao confirmada")
 	}
 
 	outside := a.discordsOutside(installs, list)
@@ -318,7 +362,10 @@ func (a *app) connect(action string) error {
 // Ultimo recurso quando a tela da Proton muda e a automacao nao acha os botoes.
 func (a *app) connectByHand(cause error) error {
 	since := time.Now()
-	text := fmt.Sprintf("Nao consegui reconectar a Proton sozinho (%v).\n\nNa janela da Proton, clique em Desconectar e depois conecte num pais fora do Brasil. Quando terminar, clique OK aqui.", cause)
+	text := fmt.Sprintf("Não consegui reconectar a Proton sozinho (%v).\n\n"+
+		"Na janela da Proton: clique em Desconectar, depois vá em Países, escolha um país fora do Brasil (por exemplo Estados Unidos) e conecte.\n\n"+
+		"Não use o botão Conectar grande: ele vai para o \"País mais rápido\", que costuma ser o Brasil.\n\n"+
+		"Quando terminar, clique OK aqui.", cause)
 	if messageBox(text, mbOKCancel|mbIconWarning) != idOK {
 		return errors.New("cancelado. O Discord nao foi aberto para nao sair fora da VPN")
 	}
@@ -361,8 +408,7 @@ func (a *app) watch(target Install, duration time.Duration) error {
 		if len(paths) == 0 {
 			continue
 		}
-		installs := detectInstalls(a.local)
-		settings, list, plan, err := a.plan(installs)
+		_, list, plan, err := a.plan(detectInstalls(a.local))
 		if err != nil {
 			return err
 		}
@@ -372,21 +418,37 @@ func (a *app) watch(target Install, duration time.Duration) error {
 				fresh = true
 			}
 		}
-		if !fresh {
+		// Pasta nova que ainda nao passou na checagem de completa vira plano vazio:
+		// espera a proxima volta.
+		if !fresh || plan.empty() {
 			continue
 		}
 
-		if plan.empty() {
-			// A pasta nova ainda nao passou na checagem de completa; espera a proxima volta.
-			continue
-		}
 		a.log.Printf("o %s abriu de uma pasta nova (%s), atualizando a Proton", target.Channel.Friendly, paths[0])
-		if err := a.update(settings, list, plan, installs); !errors.Is(err, errReconnectDeclined) {
-			return err
+		err = a.updateInTurn()
+		if errors.Is(err, errReconnectDeclined) {
+			return nil
 		}
-		return nil
+		return err
 	}
 	return nil
+}
+
+// Pega a vez e refaz o plano ja com ela: outra copia que estava na frente pode ter
+// resolvido a mesma atualizacao enquanto esta esperava.
+func (a *app) updateInTurn() error {
+	release, err := a.takeTurn()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	installs := detectInstalls(a.local)
+	settings, list, plan, err := a.plan(installs)
+	if err != nil || plan.empty() {
+		return err
+	}
+	return a.update(settings, list, plan, installs)
 }
 
 func trimLog(path string, max, keep int64) {
