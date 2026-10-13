@@ -58,18 +58,30 @@ A própria Proton tem esse comportamento ao conectar, com ou sem este programa. 
 
 - Windows 10 ou 11.
 - [Proton VPN](https://protonvpn.com/download) com plano pago. O split tunneling não existe no grátis.
-- Na Proton: **Configurações → Split tunneling → ligado, modo Incluir**.
-- [Go](https://go.dev/dl/) 1.22 ou mais novo, para compilar.
+- Na Proton:
+  - **Configurações → Split tunneling → ligado, modo Incluir**. Não precisa pôr o Discord na lista, o programa faz isso.
+  - Conecte uma vez à mão em **Países → Estados Unidos** (ou outro país fora do Brasil). Para reconectar, o programa usa a aba Recentes, e num computador novo ela está vazia.
 
 ## Instalação
+
+1. Baixe o `DiscordProton.exe` e o `Criar-atalhos.ps1` da [última release](https://github.com/aDwCarrazzone/DiscordProton/releases/latest). Ponha os dois numa pasta fixa, por exemplo `C:\DiscordProton`: os atalhos apontam para ela.
+2. Desbloqueie os dois arquivos: botão direito → **Propriedades** → marque **Desbloquear** → **OK**. Eles não têm assinatura digital, e sem isso o PowerShell recusa o script ("não está assinado digitalmente"). Se o Windows mostrar "O Windows protegeu o computador" no `.exe`, clique em **Mais informações → Executar assim mesmo**.
+3. Clique com o botão direito em `Criar-atalhos.ps1` e escolha **Executar com o PowerShell**. Ele cria na área de trabalho um atalho "Discord (Proton)" para cada Discord instalado. Use esses atalhos no lugar dos normais.
+4. No primeiro clique, o Discord ainda não está na lista da Proton, e o programa pergunta se pode reconectar. Feche os jogos antes e responda **Sim**.
+
+### Compilar você mesmo
+
+Precisa do [Go](https://go.dev/dl/) 1.22 ou mais novo.
 
 ```
 git clone https://github.com/aDwCarrazzone/DiscordProton.git
 cd DiscordProton
-go build -ldflags "-H=windowsgui -s -w" -o DiscordProton.exe .
+go build -trimpath -ldflags "-H=windowsgui -s -w" -o DiscordProton.exe .
 ```
 
-Depois clique com o botão direito em `Criar-atalhos.ps1` e escolha **Executar com o PowerShell**. Ele cria na área de trabalho um atalho "Discord (Proton)" para cada Discord instalado. Use esses atalhos no lugar dos normais.
+Depois siga os passos 3 e 4 acima.
+
+As releases saem desse mesmo comando, com `CGO_ENABLED=0`, num clone limpo na tag da versão. Com a versão do Go indicada nas notas da release, o resultado é o mesmo arquivo, e dá para conferir pelo SHA-256 publicado lá.
 
 ### Opções
 

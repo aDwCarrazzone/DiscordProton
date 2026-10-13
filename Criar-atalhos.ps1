@@ -10,7 +10,8 @@ $alvo = Join-Path $pasta 'DiscordProton.exe'
 if (-not (Test-Path -LiteralPath $alvo)) {
     Write-Host ''
     Write-Host 'Nao encontrei o DiscordProton.exe nesta pasta.' -ForegroundColor Red
-    Write-Host 'Compile com: go build -ldflags "-H=windowsgui -s -w" -o DiscordProton.exe .'
+    Write-Host 'Baixe ele da release: https://github.com/aDwCarrazzone/DiscordProton/releases/latest'
+    Write-Host 'Ou compile com: go build -trimpath -ldflags "-H=windowsgui -s -w" -o DiscordProton.exe .'
     Write-Host ''
     Read-Host 'Pressione Enter para fechar'
     exit 1
