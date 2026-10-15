@@ -24,14 +24,16 @@ Além disso, a Proton só aplica a lista na hora de conectar, e o app dela não 
 A cada clique no atalho:
 
 1. Descobre a versão atual de cada Discord instalado (normal, PTB e Canary). Ignora pastas de atualização interrompida.
-2. Lê a lista de split tunneling da Proton. **Se já está em dia, só abre o Discord.**
+2. Lê a lista de split tunneling da Proton. **Se já está em dia, só abre o Discord.** Uma versão antiga que sumiu do disco não basta para reconectar: ela sai da lista junto com a próxima atualização.
 3. **Se o Discord mudou de pasta:**
    1. **Pergunta antes de reconectar.**
-   2. Fecha o app da Proton (o túnel continua de pé), faz backup da configuração e grava a lista nova.
-   3. Reabre a Proton e aperta **Desconectar** e **Conectar** na mesma conexão de antes, pela aba Recentes.
-   4. Confirma no log da Proton que ela conectou fora do Brasil.
-4. Abre o Discord e o reinicia se ele estava rodando fora do túnel.
-5. Vigia o Discord por 3 minutos. Se ele se atualizar na própria abertura e voltar de uma pasta nova, repete o passo 3.
+   2. Fecha o app da Proton, faz backup da configuração e grava a lista nova.
+   3. Reinicia o serviço da Proton. O Windows pede permissão de administrador (veja abaixo por quê).
+   4. Reabre a Proton e conecta na mesma conexão de antes, pela aba Recentes.
+   5. Confirma no log da Proton que ela conectou fora do Brasil.
+4. Abre o Discord e reinicia os que estavam rodando fora do túnel.
+5. **Confere se o Discord está mesmo saindo pela VPN**, pelo endereço das conexões dele. Se não estiver, avisa e oferece consertar: reinicia o serviço da Proton e o Discord.
+6. Vigia o Discord por 3 minutos. Se ele se atualizar na própria abertura e voltar de uma pasta nova, repete os passos 3 e 5.
 
 Se a Proton estiver desconectada, ele conecta na conexão recente mais nova que não seja do Brasil antes de abrir o Discord. Ele nunca escolhe o "País mais rápido", que costuma cair no Brasil, nem quando essa era a conexão anterior.
 
@@ -46,7 +48,13 @@ Cliques seguidos em atalhos diferentes entram numa fila: só um por vez mexe na 
 - **Backup:** a configuração anterior vai para `%LOCALAPPDATA%\DiscordProton\backup` (ficam as 10 mais recentes).
 - **Registro:** `%LOCALAPPDATA%\DiscordProton\discordproton.log`.
 
-Ele não precisa de administrador, não instala nada e não fala com nenhum servidor.
+Ele só pede administrador para reiniciar o serviço da Proton: quando o Discord muda de pasta ou quando a conferência acha o Discord fora da VPN. Não instala nada e não fala com nenhum servidor.
+
+### Por que ele reinicia o serviço da Proton
+
+O serviço da Proton (testado na 5.1.8) às vezes continua aplicando a lista antiga. A reconexão registra no log que aplicou a lista nova, mas as regras de rede que decidem quem entra no túnel continuam as de antes. O Discord que mudou de pasta fica de fora, e os que não mudaram continuam funcionando, o que engana. Isso foi visto a partir da segunda troca de lista desde que o serviço subiu.
+
+Reiniciado, o serviço sobe limpo e aplica a lista atual. Se você recusar a permissão de administrador, o programa só reconecta, como antes, e a conferência depois de abrir avisa se não deu certo.
 
 ### Por que ele pergunta antes de reconectar
 
@@ -96,9 +104,10 @@ As releases saem desse mesmo comando, com `CGO_ENABLED=0`, num clone limpo na ta
 ```
 main.go             fluxo: conferir a lista, atualizar, reconectar, abrir e vigiar
 discord.go          acha a versão atual de cada canal e abre o Discord pelo Update.exe
-proton.go           lê e grava a configuração da Proton, confere túnel e log de conexão
+proton.go           lê e grava a configuração da Proton, confere túnel e log, reinicia o serviço
+route.go            confere por onde as conexões do Discord estão saindo
 uia.go / uia.ps1    aperta os botões da Proton pela automação de interface do Windows
-winapi_windows.go   caminho dos processos, instância única e caixas de mensagem
+winapi_windows.go   processos, conexões TCP, instância única e caixas de mensagem
 Criar-atalhos.ps1   atalhos na área de trabalho
 ```
 
@@ -119,10 +128,13 @@ set DISCORDPROTON_REAL_SETTINGS=1
 go test -run Real -v ./...
 ```
 
+Para ver por onde cada Discord aberto está saindo agora (pelo túnel ou por fora), troque a variável por `DISCORDPROTON_REAL_ROUTE=1`.
+
 ## Limitações conhecidas
 
 - Depende do formato do `UserSettings.*.json` e dos `AutomationId` da Proton para Windows (testado na 5.1.8).
 - A Proton não tem comando para reconectar. Se a automação de interface quebrar, sobra o aviso para reconectar à mão.
+- A conferência de rota olha só as conexões TCP IPv4 do Discord. Conectada, a Proton desliga o IPv6 das outras placas de rede.
 - Só o Discord oficial (normal, PTB e Canary) instalado em `%LOCALAPPDATA%`.
 
 ## Licença

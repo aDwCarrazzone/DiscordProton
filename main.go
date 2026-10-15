@@ -138,7 +138,7 @@ func (a *app) run(opts options) error {
 	}
 
 	declined := false
-	if !plan.empty() {
+	if plan.changesTunnel() {
 		err := a.update(settings, list, plan, installs)
 		switch {
 		case errors.Is(err, errReconnectDeclined):
@@ -146,8 +146,13 @@ func (a *app) run(opts options) error {
 		case err != nil:
 			return err
 		}
-	} else if err := a.ensureConnected(installs); err != nil {
-		return err
+	} else {
+		if !plan.empty() {
+			a.log.Print("so ha versoes antigas para tirar da lista, isso fica para a proxima atualizacao")
+		}
+		if err := a.ensureConnected(installs); err != nil {
+			return err
+		}
 	}
 
 	if err := launchDiscord(target); err != nil {
@@ -159,6 +164,9 @@ func (a *app) run(opts options) error {
 	release = nil
 	if declined {
 		return nil
+	}
+	if err := a.checkRoute(target); err != nil {
+		return err
 	}
 	return a.watch(target, opts.watch)
 }
@@ -223,8 +231,8 @@ func describePlan(list appList, plan syncPlan) string {
 }
 
 // A Proton manda a lista ao servico so na hora de conectar, e nao tem comando para
-// reconectar. Por isso: fecha o app, grava a lista, reabre e aperta Desconectar e
-// Conectar na janela dela.
+// reconectar. Por isso: fecha o app, grava a lista, reinicia o servico (que as vezes
+// guarda as regras da lista antiga), reabre o app e conecta pela janela dele.
 func (a *app) update(settings *protonSettings, list appList, plan syncPlan, installs []Install) error {
 	a.log.Print(describePlan(list, plan))
 
@@ -236,19 +244,19 @@ func (a *app) update(settings *protonSettings, list appList, plan syncPlan, inst
 		return err
 	}
 
-	wasUp := tunnelUp()
-	if wasUp {
-		if !confirmReconnect() {
-			a.log.Print("reconexao recusada, a lista da Proton fica como estava")
-			return errReconnectDeclined
-		}
-		a.log.Print("reconexao confirmada")
+	if !confirmReconnect() {
+		a.log.Print("reconexao recusada, a lista da Proton fica como estava")
+		return errReconnectDeclined
 	}
+	a.log.Print("reconexao confirmada")
 
+	wasUp := tunnelUp()
 	outside := a.discordsOutside(installs, list)
 	if !wasUp {
 		outside = a.discordsOutside(installs, appList{})
 	}
+	// Com o servico reiniciado o tunel cai, e todo Discord aberto reconecta por casa.
+	everyone := a.discordsOutside(installs, appList{})
 
 	if protonClientRunning() {
 		a.log.Print("fechando o app da Proton para ele reler a configuracao")
@@ -262,13 +270,21 @@ func (a *app) update(settings *protonSettings, list appList, plan syncPlan, inst
 	}
 	a.log.Printf("lista gravada, backup em %s", backup)
 
-	if err := showProtonClient(); err != nil {
-		return fmt.Errorf("nao consegui reabrir a Proton: %w", err)
+	action := "connect"
+	if err := restartProtonService(); err != nil {
+		// Sem o reinicio, sobra a reconexao de antes; a conferencia da rota depois de
+		// abrir avisa se a Proton ficou com a lista antiga.
+		a.log.Printf("servico da Proton nao reiniciado (%v), so reconectando", err)
+		if wasUp {
+			action = "reconnect"
+		}
+	} else {
+		a.log.Print("servico da Proton reiniciado")
+		outside = everyone
 	}
 
-	action := "connect"
-	if wasUp {
-		action = "reconnect"
+	if err := showProtonClient(); err != nil {
+		return fmt.Errorf("nao consegui reabrir a Proton: %w", err)
 	}
 	if err := a.connect(action); err != nil {
 		return err
@@ -282,10 +298,121 @@ var errReconnectDeclined = errors.New("reconexao da Proton recusada")
 // presa no tunel, e a que ja estava nele cai. Foi assim que um jogo aberto acabou indo
 // pela VPN. Por isso a reconexao so acontece com o sim de quem esta no computador.
 func confirmReconnect() bool {
-	text := "O Discord foi atualizado e a Proton precisa reconectar para incluir a versão nova (uns 5 segundos).\n\n" +
+	text := "O Discord foi atualizado e a Proton precisa reiniciar para incluir a versão nova (uns 15 segundos).\n\n" +
+		"Em seguida o Windows pede permissão de administrador: é para reiniciar o serviço da Proton, que às vezes continua usando a lista antiga. Os Discords abertos reiniciam junto.\n\n" +
 		"Se tiver um jogo aberto, feche antes ou espere a partida acabar: o que se conectar durante a reconexão pode acabar indo pela VPN.\n\n" +
-		"OK: reconectar agora.\nCancelar: abrir o Discord assim mesmo, sem VPN (o Go Live fica bloqueado até a próxima vez)."
+		"OK: reiniciar agora.\nCancelar: abrir o Discord assim mesmo, sem VPN (o Go Live fica bloqueado até a próxima vez)."
 	return messageBox(text, mbOKCancel|mbIconWarning) == idOK
+}
+
+const routeWait = 45 * time.Second
+
+// Confere pelo IP local das conexoes que o Discord saiu mesmo pelo tunel. Sem isso, o
+// servico da Proton com as regras da lista antiga passava calado: o programa dizia que
+// estava tudo certo e o Go Live continuava bloqueado.
+func (a *app) checkRoute(target Install) error {
+	name := target.Channel.Friendly
+	switch waitRoute(target.Channel.Binary, routeWait) {
+	case routeTunnel:
+		a.log.Printf("%s saindo pelo tunel", name)
+		return nil
+	case routeUnknown:
+		a.log.Printf("%s sem conexao com a internet para conferir por onde sai", name)
+		return nil
+	}
+
+	// Discord que se atualizou na propria abertura sai de uma pasta que ainda nao esta na
+	// lista. Ai o conserto e a lista nova, e quem cuida disso e a vigia.
+	if a.offList(target) {
+		a.log.Printf("%s saindo por fora do tunel de uma pasta que ainda nao esta na lista", name)
+		return nil
+	}
+	a.log.Printf("%s saindo por fora do tunel, mesmo estando na lista da Proton", name)
+	if !confirmRepair(name) {
+		a.log.Print("conserto recusado")
+		return nil
+	}
+	err := a.repairInTurn()
+	if errors.Is(err, errElevationDeclined) {
+		a.log.Print("sem permissao de administrador, o Discord fica fora da VPN")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if waitRoute(target.Channel.Binary, routeWait) == routeOutside && !a.offList(target) {
+		return fmt.Errorf("mesmo com o servico da Proton reiniciado, o %s continua saindo por fora da VPN. Confira na Proton se o split tunneling esta no modo Incluir e se o Discord aparece marcado na lista", name)
+	}
+	a.log.Printf("%s consertado", name)
+	return nil
+}
+
+func (a *app) offList(target Install) bool {
+	_, list, _, err := a.plan(detectInstalls(a.local))
+	return err == nil && len(a.discordsOutside([]Install{target}, list)) > 0
+}
+
+func confirmRepair(name string) bool {
+	text := fmt.Sprintf("O %s abriu, mas está saindo pela internet de casa, e não pela VPN: o Go Live vai ficar bloqueado.\n\n"+
+		"Isso acontece quando o serviço da Proton continua usando a lista antiga. Para consertar, ele precisa reiniciar: o Windows vai pedir permissão de administrador, e os Discords abertos reiniciam junto.\n\n"+
+		"Se tiver um jogo aberto, feche antes ou espere a partida acabar.\n\n"+
+		"OK: consertar agora.\nCancelar: deixar como está.", name)
+	return messageBox(text, mbOKCancel|mbIconWarning) == idOK
+}
+
+// Um Discord recem-aberto leva alguns segundos ate a primeira conexao.
+func waitRoute(binary string, timeout time.Duration) route {
+	deadline := time.Now().Add(timeout)
+	for {
+		r := currentRoute(binary)
+		if r != routeUnknown || time.Now().After(deadline) {
+			return r
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func currentRoute(binary string) route {
+	tunnel, ok := tunnelIP()
+	if !ok {
+		return routeUnknown
+	}
+	procs, _ := processes(binary)
+	if len(procs) == 0 {
+		return routeUnknown
+	}
+	pids := make(map[uint32]bool, len(procs))
+	for _, p := range procs {
+		pids[p.pid] = true
+	}
+	conns, err := establishedTCP()
+	if err != nil {
+		return routeUnknown
+	}
+	return classifyRoute(conns, pids, tunnel)
+}
+
+// Reinicia o servico da Proton, conecta de novo e reabre os Discords abertos, que com o
+// tunel caido reconectaram por casa.
+func (a *app) repairInTurn() error {
+	release, err := a.takeTurn()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	everyone := a.discordsOutside(detectInstalls(a.local), appList{})
+	if err := restartProtonService(); err != nil {
+		return err
+	}
+	a.log.Print("servico da Proton reiniciado")
+	if err := showProtonClient(); err != nil {
+		return fmt.Errorf("nao consegui abrir a Proton: %w", err)
+	}
+	if err := a.connect("connect"); err != nil {
+		return err
+	}
+	return a.restart(everyone)
 }
 
 // Discord aberto por um caminho que nao estava ativo na lista saiu pela internet de
@@ -420,7 +547,7 @@ func (a *app) watch(target Install, duration time.Duration) error {
 		}
 		// Pasta nova que ainda nao passou na checagem de completa vira plano vazio:
 		// espera a proxima volta.
-		if !fresh || plan.empty() {
+		if !fresh || !plan.changesTunnel() {
 			continue
 		}
 
@@ -429,7 +556,10 @@ func (a *app) watch(target Install, duration time.Duration) error {
 		if errors.Is(err, errReconnectDeclined) {
 			return nil
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		return a.checkRoute(target)
 	}
 	return nil
 }
@@ -445,7 +575,7 @@ func (a *app) updateInTurn() error {
 
 	installs := detectInstalls(a.local)
 	settings, list, plan, err := a.plan(installs)
-	if err != nil || plan.empty() {
+	if err != nil || !plan.changesTunnel() {
 		return err
 	}
 	return a.update(settings, list, plan, installs)

@@ -137,6 +137,22 @@ func TestSyncReactivatesInsteadOfDuplicating(t *testing.T) {
 	}
 }
 
+// O Discord apagou a pasta antiga mas a atual ja esta na lista: so limpeza, sem reconectar.
+func TestDroppingOldVersionDoesNotChangeTunnel(t *testing.T) {
+	apps := []splitApp{
+		{AppFilePath: `C:\D\app-1.0.1\Discord.exe`, IsActive: true},
+		{AppFilePath: `C:\D\app-1.0.2\Discord.exe`, IsActive: true},
+	}
+	exists := func(path string) bool { return strings.Contains(path, "1.0.2") }
+	plan := planSync(apps, []string{`C:\D\app-1.0.2\Discord.exe`}, []string{`C:\D`}, exists)
+	if len(plan.Drop) != 1 || plan.changesTunnel() {
+		t.Fatalf("esperava so tirar a versao velha, sem reconectar: %+v", plan)
+	}
+	if !planSync(apps, []string{`C:\D\app-1.0.3\Discord.exe`}, []string{`C:\D`}, exists).changesTunnel() {
+		t.Fatal("versao nova fora da lista tem que reconectar")
+	}
+}
+
 func TestSyncLeavesUnrelatedEntriesAlone(t *testing.T) {
 	apps := []splitApp{
 		{AppFilePath: `C:\Outro\app-1.0.0\Outro.exe`, IsActive: true},

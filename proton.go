@@ -25,6 +25,7 @@ const (
 	modeInclude = "Inverse"
 
 	protonClientExe = "ProtonVPN.Client.exe"
+	protonService   = "ProtonVPN Service"
 )
 
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
@@ -232,6 +233,13 @@ func (p syncPlan) empty() bool {
 	return len(p.Add) == 0 && len(p.Activate) == 0 && len(p.Drop) == 0
 }
 
+// Tirar da lista uma versao que ja nao existe nao muda quem entra no tunel, e nao vale
+// derrubar a VPN e reiniciar os Discords por isso. A limpeza vai junto com a proxima
+// troca de verdade.
+func (p syncPlan) changesTunnel() bool {
+	return len(p.Add) > 0 || len(p.Activate) > 0
+}
+
 // Garante cada caminho de want ativo e tira as versoes antigas do Discord que ja nao
 // existem no disco. Nada fora das pastas app-* dos canais e removido: o resto da lista
 // e escolha de quem usa a Proton.
@@ -420,11 +428,46 @@ func protonLauncher() (string, error) {
 	return best, nil
 }
 
-// Com a Proton conectada aparece o adaptador ProtonVPN com um IPv4 do tunel.
+var errElevationDeclined = errors.New("a permissao de administrador foi recusada")
+
+// O servico da Proton as vezes continua com as regras de split tunneling da lista
+// antiga: a reconexao registra que aplicou a lista nova e nao aplica. Foi visto em 14 e
+// 15/10, a partir da segunda troca de lista desde que o servico subiu. Reiniciado, ele
+// sobe limpo e aplica a lista atual na proxima conexao. Precisa de administrador, entao
+// o Windows pergunta.
+func restartProtonService() error {
+	err := runElevated(fmt.Sprintf("try { Restart-Service -Name %s -Force -ErrorAction Stop } catch { exit 1 }", psQuote(protonService)))
+	if err != nil && !errors.Is(err, errElevationDeclined) {
+		return fmt.Errorf("nao consegui reiniciar o servico da Proton: %w", err)
+	}
+	return err
+}
+
+// Roda um comando do PowerShell como administrador e espera ele terminar. O Start-Process
+// lanca erro quando a pessoa recusa a permissao, e isso vira o codigo 2.
+func runElevated(command string) error {
+	outer := fmt.Sprintf("try { $p = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden "+
+		"-ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand',%s; exit $p.ExitCode } catch { exit 2 }", psQuote(encodePowerShell(command)))
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShell(outer))
+	cmd.SysProcAttr = hiddenProcess()
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 2 {
+		return errElevationDeclined
+	}
+	return err
+}
+
 func tunnelUp() bool {
+	_, ok := tunnelIP()
+	return ok
+}
+
+// Com a Proton conectada aparece o adaptador ProtonVPN com um IPv4 do tunel.
+func tunnelIP() (net.IP, bool) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return false
+		return nil, false
 	}
 	for _, ifc := range ifaces {
 		if !strings.HasPrefix(ifc.Name, "ProtonVPN") || ifc.Flags&net.FlagUp == 0 {
@@ -433,11 +476,11 @@ func tunnelUp() bool {
 		addrs, _ := ifc.Addrs()
 		for _, addr := range addrs {
 			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-				return true
+				return ipnet.IP.To4(), true
 			}
 		}
 	}
-	return false
+	return nil, false
 }
 
 // O log da Proton e a unica fonte que diz quando ela conectou de novo e em que servidor:
